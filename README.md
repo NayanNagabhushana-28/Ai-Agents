@@ -53,7 +53,7 @@ The server is configured in `.cursor/mcp.json`. After setup, Cursor will load th
 
 | Tool | Description |
 |------|-------------|
-| `list_issues` | List issues from a repository. Params: owner, repo, state, labels, sort, per_page, page, include_pull_requests |
+| `list_issues` | List issues. Params: owner, repo, state, labels, sort, per_page, page, include_pull_requests, **enrich_linked_prs** |
 | `get_issue` | Get full details of a single issue by number |
 
 ### Running Standalone

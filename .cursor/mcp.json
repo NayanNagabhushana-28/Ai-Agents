@@ -2,7 +2,7 @@
   "mcpServers": {
     "github-issues": {
       "command": "python",
-      "args": ["run_server.py"],
+      "args": ["${workspaceFolder}/run_server.py"],
       "env": {}
     }
   }
