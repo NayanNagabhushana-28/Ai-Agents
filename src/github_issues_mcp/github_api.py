@@ -1,4 +1,22 @@
-"""GitHub API client for fetching repository issues."""
+"""
+HTTP client for the GitHub REST API (issues, timeline, pull requests).
+
+This module talks to ``api.github.com`` via ``httpx``. It does *not* know about MCP
+or LLMs — it only fetches and returns JSON dicts.
+
+Authentication
+--------------
+Set ``GITHUB_TOKEN`` in the environment for higher rate limits (5000 req/hr vs 60).
+Without a token, public repos may still work but will hit limits quickly.
+
+Used by
+-------
+- ``mcp_tools/issue_list_tools.py`` — MCP tools for Cursor
+- ``agents/easy_issue_finder/`` — LLM agent tool handlers (planned)
+- Future ``agents/triage_agent/`` — may reuse the same API layer
+"""
+
+from __future__ import annotations
 
 import os
 import re
@@ -6,13 +24,19 @@ from typing import Any
 
 import httpx
 
+# Base URL for all GitHub REST v3 requests in this project.
 GITHUB_API_BASE = "https://api.github.com"
 
+# Extracts pull request number from URLs like .../repos/o/r/pulls/123
 _PULL_FROM_API_URL_RE = re.compile(r"/repos/[^/]+/[^/]+/pulls/(\d+)\s*$")
 
 
 def _get_headers() -> dict[str, str]:
-    """Build request headers with optional authentication."""
+    """
+    Build HTTP headers for GitHub API requests.
+
+    Adds ``Authorization: Bearer …`` when ``GITHUB_TOKEN`` is set in the environment.
+    """
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -35,24 +59,30 @@ def fetch_issues(
     include_pull_requests: bool = True,
 ) -> list[dict[str, Any]]:
     """
-    Fetch issues from a GitHub repository.
+    Fetch a page of issues (and optionally PRs) from a repository.
 
-    When include_pull_requests=False, uses the Search API (is:issue) to return
-    only issues, avoiding the mixed issues+PRs from the repos endpoint.
+    When ``include_pull_requests=False``, uses the Search API with ``is:issue`` so
+    results never mix in pull requests (the ``/repos/.../issues`` endpoint returns both).
 
-    Args:
-        owner: Repository owner (e.g., pytorch)
-        repo: Repository name (e.g., pytorch)
-        state: open, closed, or all
-        labels: Comma-separated label names (e.g., bug,module: autograd)
-        sort: created, updated, or comments
-        direction: asc or desc
-        per_page: Results per page (1-100)
-        page: Page number
-        include_pull_requests: If False, use Search API for issues only
+    Parameters
+    ----------
+    owner, repo:
+        GitHub repository coordinates (e.g. ``pytorch``, ``pytorch``).
+    state:
+        ``open``, ``closed``, or ``all``.
+    labels:
+        Comma-separated label names to filter (optional).
+    sort, direction:
+        Sort field and ``asc`` / ``desc`` order.
+    per_page, page:
+        Pagination (GitHub max 100 per page).
+    include_pull_requests:
+        If ``False``, search for issues only.
 
-    Returns:
-        List of issue dicts from the GitHub API
+    Returns
+    -------
+    list[dict]
+        Raw issue objects as returned by GitHub (large JSON blobs).
     """
     target_count = min(max(per_page, 1), 100)
 
@@ -68,7 +98,6 @@ def fetch_issues(
             page=page,
         )
 
-    # Include PRs: use repos/issues endpoint
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
     params: dict[str, Any] = {
         "state": state,
@@ -96,7 +125,11 @@ def _fetch_issues_via_search(
     per_page: int,
     page: int,
 ) -> list[dict[str, Any]]:
-    """Fetch issues only via Search API (is:issue)."""
+    """
+    Internal: list issues only via ``GET /search/issues`` (``is:issue`` qualifier).
+
+    Avoids pull requests that appear on the repository issues endpoint.
+    """
     url = f"{GITHUB_API_BASE}/search/issues"
     q_parts = [f"repo:{owner}/{repo}", "is:issue", f"state:{state}"]
     if labels:
@@ -118,7 +151,11 @@ def _fetch_issues_via_search(
 
 
 def _check_response(response: httpx.Response, owner: str, repo: str) -> None:
-    """Raise ValueError on auth/not-found errors."""
+    """
+    Raise ``ValueError`` with a helpful message for common GitHub API failures.
+
+    Other HTTP errors propagate via ``raise_for_status()``.
+    """
     if response.status_code == 401:
         raise ValueError(
             "GitHub API returned 401: Invalid or missing GITHUB_TOKEN. "
@@ -135,19 +172,25 @@ def _check_response(response: httpx.Response, owner: str, repo: str) -> None:
 
 
 def _gather_pull_numbers_from_timeline(events: list[dict[str, Any]]) -> set[int]:
+    """
+    Collect pull request numbers mentioned on an issue timeline.
+
+    GitHub emits different event shapes; we look for:
+    - ``pull_request_url`` on review-related events
+    - ``cross-referenced`` events where ``source.issue`` contains ``pull_request``
+    """
     numbers: set[int] = set()
     for ev in events:
         if isinstance(ev.get("pull_request_url"), str):
-            m = _PULL_FROM_API_URL_RE.search(ev["pull_request_url"])
-            if m:
-                numbers.add(int(m.group(1)))
+            match = _PULL_FROM_API_URL_RE.search(ev["pull_request_url"])
+            if match:
+                numbers.add(int(match.group(1)))
         if ev.get("event") != "cross-referenced":
             continue
         src = ev.get("source") or {}
         inner = src.get("issue") if isinstance(src, dict) else None
         if not isinstance(inner, dict):
             continue
-        # GitHub nests PR payloads under source.issue.{..., pull_request, state}
         if "pull_request" not in inner:
             continue
         num = inner.get("number")
@@ -164,9 +207,10 @@ def iter_issue_timeline(
     per_page: int = 100,
 ) -> list[dict[str, Any]]:
     """
-    Return the unified issue timeline (REST).
+    Fetch the full unified timeline for one issue (paginated).
 
-    Paginates until a short page or empty response.
+    The timeline includes comments, cross-references, labels, reviews, etc.
+    Used to discover pull requests linked to an issue.
     """
     per_page = min(max(per_page, 1), 100)
     page = 1
@@ -180,7 +224,6 @@ def iter_issue_timeline(
             params={"per_page": per_page, "page": page},
             timeout=30.0,
         )
-        # Mirror fetch_issue-ish errors for callers
         if response.status_code == 401:
             raise ValueError(
                 "GitHub API returned 401: Invalid or missing GITHUB_TOKEN. "
@@ -207,7 +250,12 @@ def iter_issue_timeline(
 
 
 def fetch_pull_json(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
-    """Fetch PR metadata (`state`, `merged_at`) for linkage checks."""
+    """
+    Fetch metadata for one pull request (``state``, ``draft``, etc.).
+
+    We re-fetch PRs found on the timeline so ``state`` reflects current reality,
+    not a stale snapshot embedded in a timeline event.
+    """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pull_number}"
 
     response = httpx.get(url, headers=_get_headers(), timeout=30.0)
@@ -234,26 +282,24 @@ def fetch_pull_json(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
 
 def has_open_linked_pull_request(owner: str, repo: str, issue_number: int) -> bool:
     """
-    Best-effort: True if timeline shows Linked PR refs and any fetched PR has state open.
+    Return ``True`` if the issue has at least one *open* linked pull request.
 
-    Scans Issue Timeline for cross-references to pull requests (`cross-referenced` with
-    `source.issue.pull_request`) and timeline rows that carry `pull_request_url`
-    (`reviewed`, etc.). For each distinct PR number, re-fetches `GET pulls/{id}` so
-    `state`/`draft` reflects current repo truth.
+    Workflow
+    --------
+    1. Load issue timeline events
+    2. Extract linked PR numbers
+    3. For each PR, call ``fetch_pull_json`` and check ``state == "open"``
 
-    False if enrichment ran without finding any open linked PR (including timeline empty).
-    Raises ValueError on auth / hard HTTP failures (same spirit as fetch_issue).
+    Returns ``False`` if no linked PRs or all linked PRs are closed/merged.
 
-    Limits: linkage only discoverable via events GitHub emits on the timeline; very new
-    or unusual links might be invisible until events exist.
+    Limitation: only PRs visible on GitHub's timeline are detected.
     """
     timeline = iter_issue_timeline(owner, repo, issue_number)
     pulls = sorted(_gather_pull_numbers_from_timeline(timeline))
 
     for num in pulls:
         pr = fetch_pull_json(owner, repo, num)
-        state = pr.get("state")
-        if state == "open":
+        if pr.get("state") == "open":
             return True
 
     return False
@@ -261,15 +307,9 @@ def has_open_linked_pull_request(owner: str, repo: str, issue_number: int) -> bo
 
 def fetch_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
     """
-    Fetch a single issue by number.
+    Fetch one issue or pull request by number (full GitHub JSON).
 
-    Args:
-        owner: Repository owner
-        repo: Repository name
-        issue_number: Issue or PR number
-
-    Returns:
-        Issue dict from the GitHub API
+    Use ``issue_summary.format_issue_summary`` if you need a compact list row instead.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}"
 
