@@ -1,8 +1,7 @@
 """
-HTTP client for the GitHub REST API (issues, timeline, pull requests).
+Fetch GitHub repository issues and build compact summaries for agents and MCP.
 
-This module talks to ``api.github.com`` via ``httpx``. It does *not* know about MCP
-or LLMs — it only fetches and returns JSON dicts.
+Calls ``api.github.com`` via ``httpx``. No MCP or LLM imports here.
 
 Authentication
 --------------
@@ -11,9 +10,7 @@ Without a token, public repos may still work but will hit limits quickly.
 
 Used by
 -------
-- ``mcp_tools/issue_list_tools.py`` — MCP tools for Cursor
-- ``agents/easy_issue_finder/`` — LLM agent tool handlers (planned)
-- Future ``agents/triage_agent/`` — may reuse the same API layer
+- ``mcp_servers/server_tools.py`` — MCP tools for Cursor and CLI agent
 """
 
 from __future__ import annotations
@@ -309,7 +306,7 @@ def fetch_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
     """
     Fetch one issue or pull request by number (full GitHub JSON).
 
-    Use ``issue_summary.format_issue_summary`` if you need a compact list row instead.
+    Use ``format_issue_summary`` if you need a compact list row instead.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}"
 
@@ -329,3 +326,55 @@ def fetch_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
     response.raise_for_status()
 
     return response.json()
+
+
+def assignee_logins(issue: dict[str, Any]) -> list[str]:
+    """
+    Extract assignee login names from a GitHub REST issue object.
+
+    Returns a sorted, de-duplicated list. An empty list means nobody is assigned.
+    """
+    assignees_payload = issue.get("assignees")
+    if not assignees_payload:
+        return []
+    out: list[str] = []
+    for item in assignees_payload:
+        if isinstance(item, dict) and item.get("login"):
+            out.append(str(item["login"]))
+        elif isinstance(item, str) and item:
+            out.append(item)
+    return sorted(set(out))
+
+
+def format_issue_summary(
+    issue: dict[str, Any],
+    *,
+    open_linked_pr: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Build a compact issue row for MCP list output and agent tools.
+
+    Parameters
+    ----------
+    issue:
+        Raw dict from ``fetch_issues`` or ``fetch_issue``.
+    open_linked_pr:
+        ``True`` / ``False`` when linkage was checked (see ``has_open_linked_pull_request``).
+        ``None`` when not checked — serialized as JSON ``null``.
+    """
+    body = issue.get("body") or ""
+    body_excerpt = body[:500] + "..." if len(body) > 500 else body
+    return {
+        "number": issue["number"],
+        "title": issue["title"],
+        "state": issue["state"],
+        "labels": [label["name"] for label in issue.get("labels", [])],
+        "assignees": assignee_logins(issue),
+        "created_at": issue["created_at"],
+        "updated_at": issue["updated_at"],
+        "html_url": issue["html_url"],
+        "user": issue.get("user", {}).get("login") if issue.get("user") else None,
+        "body_excerpt": body_excerpt,
+        "is_pull_request": "pull_request" in issue,
+        "open_linked_pr": open_linked_pr,
+    }
