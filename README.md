@@ -4,7 +4,7 @@ AI agents for finding approachable [PyTorch](https://github.com/pytorch/pytorch)
 
 **Goal (v1):** return **1** newcomer-friendly issue as JSON.
 
-Implementation plan: `~/.cursor/plans/easy_issue_finder_flow_447218a4.plan.md`
+Implementation plan: [`docs/easy_issue_finder_plan.md`](docs/easy_issue_finder_plan.md)
 
 ---
 
