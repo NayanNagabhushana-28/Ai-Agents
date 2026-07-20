@@ -1,103 +1,35 @@
 # Ai-Agents
 
-AI agents for finding approachable [PyTorch](https://github.com/pytorch/pytorch) GitHub issues. The project combines a **GitHub Issues MCP server**, **issue summaries with enrichment**, and (in progress) an **agentic triage runner** with a **provider-agnostic LLM wrapper** (planned; Anthropic in v1).
+AI agents for finding approachable [PyTorch](https://github.com/pytorch/pytorch) GitHub issues. The project combines a **GitHub Issues MCP server**, **issue summaries with enrichment**, and (in progress) an **agentic triage runner** backed by a **provider-agnostic LLM wrapper** (Anthropic in v1).
 
-Canonical implementation plan: `~/.cursor/plans/easy_issue_triage_workflow_eb1c532e.plan.md`
+**Goal (v1):** return **1** newcomer-friendly issue as JSON.
+
+Implementation plan: `~/.cursor/plans/easy_issue_finder_flow_447218a4.plan.md`
 
 ---
 
 ## Workflow
 
-End-to-end goal: return **easy, open, unassigned issues with no open linked PR** suitable for newcomers (v1 default: **1** issue).
+The CLI runs four phases in order. Do not skip ahead — each phase is tested before the next starts.
 
-| Step | Description | Status |
-|------|-------------|--------|
-| 1 | **MCP / GitHub fetch** — list and get issues via MCP or `github_api` | Done |
-| 2 | **Spec / contract** — filters, easy rules, JSON output shape in prompt | Done |
-| 3 | **Prompt template** — [`prompts/easy_issue_finder/`](prompts/easy_issue_finder/) | Done |
-| 4 | **Runtime** — Python CLI (mode A); Cursor + MCP for manual use | Pending |
-| 5 | **LLM provider wrapper** — `LLMProvider` Protocol; Anthropic v1 only; OpenAI/etc. in v2 | Pending |
-| 6 | **Agentic dry run** — tool loop (`list_issues`) until 1 easy issue or caps; pre-filter in tool handlers | Pending |
-| 7 | **Validate & tune** — parse JSON, schema check, refine prompt from failures | Pending |
-| 8 | **Scale** — raise scan caps (toward 1000), cache, logging, tests | Pending |
+![Easy issue finder workflow](docs/images/easy-issue-finder-workflow.png)
 
-**Progress: 2 / 7 plan todos complete** (see [Implementation status](#implementation-status) below).
+| Phase | What it does | Status |
+|-------|--------------|--------|
+| **0 — ENTRY** | CLI skeleton: 4 flags, `main()` calls four named steps | **Done** |
+| **1 — SETUP** | Load Vertex config from `.env`, establish Claude connection (ADC) | **Done** |
+| **2 — BUILD PROMPT** | Load `user.txt`, fill placeholders, build first message for the agent loop | **Done** |
+| **3 — AGENT LOOP** | Claude calls `list_issues` via MCP until final JSON or `max_tool_rounds` | **Done** |
+| **4 — VALIDATE** | Parse JSON, check schema, print result | Pending |
 
-> **Maintainer convention:** When a plan todo is completed, update this README in the same change set. Every new module needs a **module docstring** (purpose, who calls it) and **function docstrings** written for beginners.
+**Also done (supports Phase 3, not a CLI phase):** GitHub fetch + issue summaries + MCP server.
 
----
+### Design choices
 
-## Code conventions (all todos)
-
-**File names** — short, self-explanatory nouns (not `utils.py` or `helpers.py`):
-
-| Area | File | Purpose |
-|------|------|---------|
-| GitHub HTTP | `github_api.py` | REST calls to api.github.com |
-| Issue shaping | `issue_summary.py` | Raw issue JSON → compact summary dict |
-| MCP tools | `mcp_tools/issue_list_tools.py` | Issue list/get tools (more modules later) |
-| MCP app | `mcp_server.py` | Registers all `mcp_tools` groups |
-| Prompts | `prompts/<agent_name>/` | One folder per agent |
-| *Planned* finder | `agents/easy_issue_finder/finder_runner.py` | easy_issue_finder loop |
-| *Planned* finder tools | `agents/easy_issue_finder/github_issue_tools.py` | LLM-callable GitHub tools |
-| *Planned* finder validate | `agents/easy_issue_finder/result_validator.py` | JSON output checks |
-| *Planned* triage | `agents/triage_agent/` | Second agent (Phase 2+) |
-| *Planned* LLM types | `src/llm/chat_types.py` | Messages, tools, config |
-| *Planned* LLM contract | `src/llm/provider_protocol.py` | `LLMProvider` interface |
-| *Planned* LLM factory | `src/llm/provider_factory.py` | `get_llm_provider()` |
-| *Planned* Anthropic | `src/llm/providers/anthropic_provider.py` | Only file that imports `anthropic` |
-
-**Documentation:** Each public function explains *what*, *parameters*, and *returns* in plain language.
-
----
-
-## Architecture
-
-### Current (built)
-
-```text
-Cursor chat  →  MCP (stdio)  →  github_api  →  GitHub REST API
-                                      ↓
-                              issue_summary.format_issue_summary
-                              (assignees, open_linked_pr)
-```
-
-Optional enrichment: `list_issues(..., enrich_linked_prs=True)` uses Issue Timeline + `GET pulls/{n}` to set **`open_linked_pr`**.
-
-```text
-Cursor chat  →  MCP (stdio)  →  mcp_tools/issue_list_tools  →  github_api
-                                      ↓
-                              issue_summary.format_issue_summary
-```
-
-```text
-src/llm/                           shared by all agents (planned)
-src/agents/
-  easy_issue_finder/               Phase 1 agent (runner planned)
-  triage_agent/                    Phase 2+ agent (reserved)
-prompts/
-  easy_issue_finder/               prompt + prompt_loader
-  triage_agent/                    reserved
-```
-
-### Target (planned — easy_issue_finder runner)
-
-```text
-scripts/run_easy_issue_finder.py
-       ↓
-agents/easy_issue_finder/finder_runner.py
-       ↓                    ↓
-get_llm_provider()    github_issue_tools  →  github_api
-       ↓
-result_validator.py  →  final JSON
-```
-
-**Design choices:**
-
-- **Agentic v1:** The model calls **`list_issues`** (paginate) until it returns **1 easy** issue or hits **`max_tool_rounds` / `max_issues_scanned`**.
-- **Pre-filter in Python:** Tool handlers drop issues that are not open, assigned, or have an open linked PR (when enrichment is on). The LLM focuses on **easy vs hard**.
-- **Prompt:** [`prompts/easy_issue_finder/`](prompts/easy_issue_finder/) via `load_easy_issue_finder_prompt()`.
-- **Multi-agent:** Shared `github_api` + `llm`; each agent gets its own folder under `src/agents/` and `prompts/`.
+- **Agentic v1:** The model calls **`list_issues`** (paginate) until it returns **1 easy** issue or hits **`max_tool_rounds`**.
+- **Pre-filter in Python:** MCP `list_issues` with `no_linked_prs=True` drops issues that have an open linked PR before the model sees them.
+- **Prompt:** [`prompts/easy_issue_finder/user.txt`](prompts/easy_issue_finder/user.txt) loaded by [`build_prompt.py`](src/easy_issue_finder/build_prompt.py) → provider-neutral message dicts for `client.chat()`.
+- **Multi-agent:** Shared `fetch_github_issues` + `llm`; agent code under `src/easy_issue_finder/`, prompts under `prompts/`.
 
 ### APIs used
 
@@ -105,150 +37,399 @@ result_validator.py  →  final JSON
 |-----|------|--------|
 | GitHub REST (`api.github.com`) | Issues, search, timeline, pulls | In use |
 | MCP (stdio) | Cursor integration | In use |
-| Anthropic Messages API | Agent + tool use | Planned ([`src/llm`](src/llm)) |
+| Anthropic Messages API via Vertex AI | Agent + tool use (ADC) | In use ([`src/llm`](src/llm) + [`agent_loop.py`](src/easy_issue_finder/agent_loop.py)) |
 | OpenAI / other LLMs | Alternate providers | Planned (v2) |
 
 ---
 
-## Implementation status
+## Get started
 
-| Todo | Status | What shipped |
-|------|--------|--------------|
-| `gap-format-summary` | **Done** | [`issue_summary.py`](src/github_issues_mcp/issue_summary.py): `assignees`, `open_linked_pr` |
-| `linked-pr-enrich` | **Done** | [`has_open_linked_pull_request`](src/github_issues_mcp/github_api.py); MCP `enrich_linked_prs` |
-| `llm-provider-wrapper` | Pending | [`src/llm/`](src/llm): `LLMProvider`, `AnthropicProvider`, `get_llm_provider()` |
-| `runtime-cli` | Pending | `scripts/run_easy_issue_finder.py` |
-| `agent-loop` | Pending | Tool-use loop until 1 easy issue |
-| `llm-invoke-validate` | Pending | JSON parse + schema check via `LLMProvider` |
-| `polish-docs-test` | Pending | Unit tests, caching, extended CLI docs |
+### 1. Clone and install
 
-**Also done (not separate todos):** consolidated prompt in `user.txt` only; prompt loader with `<<<PLACEHOLDER>>>` substitution.
+```bash
+git clone <your-repo-url> Ai-Agents
+cd Ai-Agents
 
----
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-## Prompt templates
-
-```python
-from prompts.easy_issue_finder import load_easy_issue_finder_prompt
-
-prompt = load_easy_issue_finder_prompt(
-    owner="pytorch",
-    repo="pytorch",
-    issues_json='[{"number": 1, "title": "...", ...}]',
-    target_easy_count=1,
-    max_issues_cap=1000,
-)
+pip install -r requirements.txt
 ```
 
-Placeholders in [`prompts/easy_issue_finder/user.txt`](prompts/easy_issue_finder/user.txt) are filled by the loader.
+Requires **Python 3.9+**, [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud`) for Claude on Vertex, and a GitHub token (for MCP / Phase 3).
 
-Legacy aliases: ``load_easy_issue_picker_prompt`` still works (imports from ``easy_issue_finder``).
+### 2. Create `.env` in the project root
+
+Copy the block below into `.env` (gitignored). Do **not** commit secrets.
+
+```bash
+# GitHub — needed for MCP and Phase 3 agent tools
+GITHUB_TOKEN=your_github_token_here
+
+# Claude on Vertex (v1) — no ANTHROPIC_API_KEY
+ANTHROPIC_VERTEX_PROJECT_ID=your-team-gcp-project-id
+CLOUD_ML_REGION=global
+MODEL=claude-sonnet-4@20250514
+
+# Optional
+# LLM_MAX_TOKENS=4096
+```
+
+| Variable | Required when | Purpose |
+|----------|---------------|---------|
+| `GITHUB_TOKEN` | MCP, Phase 3 | GitHub REST API ([create PAT](https://github.com/settings/tokens), scope `public_repo`) |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | Phase 1 live run | Your team GCP project for Claude on Vertex |
+| `CLOUD_ML_REGION` | Optional | Vertex region (default `global`) |
+| `MODEL` | Optional | Vertex model id; override with `--model` |
+| `LLM_MAX_TOKENS` | Optional | Max tokens per turn (default `4096`) |
+
+### 3. Authenticate to Google Vertex (once per machine)
+
+Run in any terminal on your laptop (not inside Python):
+
+```bash
+gcloud auth application-default login
+gcloud auth application-default set-quota-project cloudability-it-gemini
+```
+
+Sign in with your **Red Hat Google account**. Credentials are stored at `~/.config/gcloud/application_default_credentials.json`. The SDK refreshes tokens automatically — no browser on each run.
+
+Verify:
+
+```bash
+gcloud auth application-default print-access-token
+```
+
+### 4. Run the CLI
+
+```bash
+# No GCP auth needed — prints all phases (config + full prompt); skips API calls
+python run_easy_issue_finder.py --dry-run
+
+# Phases 1–3 — loads config, builds prompt, runs agent loop, then stops at Phase 4 stub
+python run_easy_issue_finder.py
+```
+
+Expected after Phase 3 (live run ends at Phase 4 stub):
+
+```text
+Load Config:
+  owner=pytorch
+  repo=pytorch
+  target_easy=1
+  max_tool_rounds=10
+  model=claude-sonnet-4@20250514
+  ...
+Config loaded successfully
+
+Build initial message:
+<full prompt text>
+
+Prompt ready for the next phase
+
+Find easy issues:
+<raw model JSON>
+
+Agent loop complete — ready for validation
+
+Validate result:
+Not implemented yet — Phase 4
+```
+
+### 5. (Optional) GitHub MCP in Cursor
+
+For browsing issues inside Cursor (separate from the CLI agent):
+
+```bash
+python src/mcp_servers/run_mcp_server.py
+```
+
+Configure `.cursor/mcp.json` to point at your venv Python. Set `GITHUB_TOKEN` in `.env` or in the MCP config. Restart Cursor after changes.
 
 ---
 
-## GitHub Issues MCP Server
+## File structure
 
-MCP server exposing GitHub repository issues as tools for Cursor IDE. Defaults to [pytorch/pytorch](https://github.com/pytorch/pytorch).
+Each line: **path** — what the file does.
 
-### Setup
+```text
+run_easy_issue_finder.py             # CLI entry: parse args, run phases 0→1→2→3→4 in order
 
-1. **Virtual environment and dependencies:**
+src/mcp_servers/run_mcp_server.py      # Start GitHub Issues MCP server for Cursor (stdio)
+src/mcp_servers/server_tools.py        # MCP tools: list_issues, get_issue
+src/mcp_servers/connect_stdio_server.py  # MCP stdio client for agent loop
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+src/llm/load_model_config.py         # Read MODEL, Vertex project/region from .env → ModelSettings
+src/llm/create_llm_connection.py     # Pick LLM backend (v1: Vertex) and establish_connection()
+src/llm/connect_vertex_claude.py     # Wrap AnthropicVertex SDK + ADC + chat()
+src/llm/build_chat_messages.py       # user/assistant/tool message dicts for client.chat()
+src/llm/model_reply_dataclass.py     # ModelReply and ToolRequest dataclasses for one model turn
+src/llm/__init__.py                  # Package docstring only; import submodules explicitly
 
-2. **GitHub token:** [Create a PAT](https://github.com/settings/tokens) with `public_repo` (read-only).
+src/fetch_github_issues.py           # Fetch issues from GitHub REST + compact summaries
+src/easy_issue_finder/build_prompt.py   # Phase 2: load user.txt, build first messages
+src/easy_issue_finder/agent_loop.py     # Phase 3: tool-use loop via MCP until 1 easy issue
+src/easy_issue_finder/__init__.py       # easy_issue_finder agent package
 
-3. **Authentication** — create `.env` in the project root (gitignored):
+prompts/easy_issue_finder/user.txt      # Prompt template with <<<PLACEHOLDER>>> slots
+prompts/easy_issue_finder/__init__.py   # Package marker (template lives in user.txt)
 
-   ```bash
-   GITHUB_TOKEN=your_github_token_here
-   ```
+requirements.txt                     # Python dependencies (includes anthropic[vertex])
+.env                                 # Your secrets and config (create locally, gitignored)
+```
 
-   Or set `GITHUB_TOKEN` in `.cursor/mcp.json` under `env`. Restart Cursor after MCP config changes.
+**Planned (not created yet):**
 
-   If the MCP server fails to start, point `command` in `.cursor/mcp.json` at the project venv Python:
+```text
+src/easy_issue_finder/result_validator.py   # Phase 4: parse and validate final JSON
+```
 
-   ```json
-   "command": "/path/to/Ai-Agents/.venv/bin/python",
-   "args": ["run_server.py"]
-   ```
+**Import style:** use explicit paths, e.g. `from llm.create_llm_connection import establish_connection` — not `from llm import ...`.
 
-### Usage in Cursor
+---
 
-Ask the AI to:
+## Completed phases
 
-- "List open issues from PyTorch"
-- "Get issue #12345 from pytorch/pytorch"
-- "List 5 recent issues with enrich_linked_prs true"
+### Phase 0 — ENTRY (Done)
 
-### MCP tools
+**What shipped:** [`run_easy_issue_finder.py`](run_easy_issue_finder.py) with six CLI flags, path setup, `.env` loading, and `main()` calling four named step functions.
+
+**Call chain (dry-run):**
+
+```text
+main()
+  ├─ setup_project_paths()      # add src/ and repo root to sys.path
+  ├─ load_env_file()            # load .env
+  ├─ parse_args()               # --owner, --repo, --model, --target-easy, --max-tool-rounds, --dry-run
+  └─ print_cli_config(args)     # print config; exit (no API calls)
+```
+
+**Call chain (normal run, through Phase 2):**
+
+```text
+main()
+  ├─ setup_project_paths()
+  ├─ load_env_file()
+  ├─ parse_args()
+  ├─ create_chat_client(args)     # Phase 1 — Load Config + establish_connection
+  └─ build_start_messages(args)   # Phase 2 — build_initial_messages → find_easy_issues stub
+```
+
+**How to test Phase 0:**
+
+```bash
+python run_easy_issue_finder.py --help
+# Expect: 6 flags (--owner, --repo, --model, --target-easy, --max-tool-rounds, --dry-run)
+
+python run_easy_issue_finder.py --dry-run
+# Expect phased output:
+#   Load Config: (owner, repo, model, vertex_project, vertex_region, max_tokens, auth)
+#   Config loaded successfully (dry-run — no API calls)
+#   Build initial message: (full prompt)
+#   Prompt ready for the next phase (dry-run)
+#   Find easy issues: Skipped — dry-run
+#   Validate result: Skipped — dry-run
+# No gcloud login or .env project id required for dry-run.
+```
+
+---
+
+### Phase 1 — SETUP (Done)
+
+**What shipped:** Vertex + ADC LLM layer under [`src/llm/`](src/llm/). Constructs `AnthropicVertex` from `.env` and implements `VertexClaudeClient.chat()` for the agent loop.
+
+**Call chain:**
+
+```text
+create_chat_client(args)                          # run_easy_issue_finder.py
+  ├─ load_model_settings(model=args.model)        # src/llm/load_model_config.py
+  │    # reads MODEL, ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION
+  │    # order: --model → MODEL env → default claude-sonnet-4@20250514
+  ├─ _print_config(args, settings)                # CLI: Load Config section
+  └─ establish_connection(settings)               # src/llm/create_llm_connection.py
+       └─ VertexClaudeClient(settings)            # src/llm/connect_vertex_claude.py
+            └─ AnthropicVertex(project_id, region)  # uses ADC from gcloud login
+  # prints: Config loaded successfully
+```
+
+**How to test Phase 1:**
+
+```bash
+# Prerequisites: pip install -r requirements.txt
+#               gcloud auth application-default login (see Get started)
+#               ANTHROPIC_VERTEX_PROJECT_ID in .env
+
+python run_easy_issue_finder.py --dry-run --model claude-test-override
+# Expect: model=claude-test-override  (--model wins over MODEL in .env)
+
+python run_easy_issue_finder.py
+# Expect phased output through Phase 3, then:
+#   Validate result:
+#   Not implemented yet — Phase 4
+
+# Fail-fast test: unset ANTHROPIC_VERTEX_PROJECT_ID, run without --dry-run
+# Expect: ValueError: ANTHROPIC_VERTEX_PROJECT_ID is required...
+```
+
+---
+
+### Phase 2 — BUILD PROMPT (Done)
+
+**What shipped:** [`src/easy_issue_finder/build_prompt.py`](src/easy_issue_finder/build_prompt.py) loads [`prompts/easy_issue_finder/user.txt`](prompts/easy_issue_finder/user.txt), fills placeholders, and returns provider-neutral message dicts via `user_message()`. The CLI prints each phase in order with a labeled header and success line.
+
+**Call chain:**
+
+```text
+build_start_messages(args)                          # run_easy_issue_finder.py
+  └─ build_initial_messages(owner, repo)            # src/easy_issue_finder/build_prompt.py
+       ├─ load_easy_issue_finder_prompt(...)        # read user.txt, fill <<<PLACEHOLDER>>> slots
+       │    issues_json="[]" at start (model fetches via tools in Phase 3)
+       └─ user_message(prompt)                      # src/llm/build_chat_messages.py
+            └─ [{"role": "user", "content": "..."}]  # passed to client.chat() in Phase 3
+```
+
+Placeholders in `user.txt`:
+
+| Placeholder | Source |
+|-------------|--------|
+| `<<<OWNER>>>` | CLI `--owner` |
+| `<<<REPO>>>` | CLI `--repo` |
+| `<<<ISSUES_JSON>>>` | `"[]"` at start; tool results in Phase 3 |
+| `<<<TARGET_EASY_COUNT>>>` | Default `1` |
+| `<<<MAX_ISSUES_CAP>>>` | Default `1000` |
+
+**How to test Phase 2:**
+
+```bash
+python run_easy_issue_finder.py --dry-run
+# Expect: Load Config → full prompt under Build initial message → dry-run skips for Phases 3–4
+
+python run_easy_issue_finder.py
+# Expect: Load Config → Config loaded successfully → full prompt → agent loop raw JSON
+#         → Agent loop complete — ready for validation
+#         → Validate result: Not implemented yet — Phase 4
+
+python -c "
+import sys; sys.path.insert(0, 'src')
+from easy_issue_finder.build_prompt import build_initial_messages
+m = build_initial_messages(owner='pytorch', repo='pytorch')
+assert m[0]['role'] == 'user' and 'pytorch' in m[0]['content'] and '[]' in m[0]['content']
+print('ok', len(m[0]['content']), 'chars')
+"
+```
+
+---
+
+### Phase 3 — AGENT LOOP (Done)
+
+**What shipped:** Full agent loop in three layers:
+
+| Sub-phase | File | What it does |
+|-----------|------|--------------|
+| **3a** | [`src/llm/connect_vertex_claude.py`](src/llm/connect_vertex_claude.py) | `VertexClaudeClient.chat()` — message mapping + `ModelReply` |
+| **3b** | [`src/mcp_servers/connect_stdio_server.py`](src/mcp_servers/connect_stdio_server.py) | MCP stdio client — spawn server, `list_tool_definitions`, `call_tool_text` |
+| **3c** | [`src/easy_issue_finder/agent_loop.py`](src/easy_issue_finder/agent_loop.py) | `run_finder()` — multi-turn loop via MCP + `client.chat()` |
+
+**Call chain:**
+
+```text
+find_easy_issues(client, messages, args, project_root)   # run_easy_issue_finder.py
+  └─ run_finder(client, config, messages, project_root)  # src/easy_issue_finder/agent_loop.py
+       ├─ open_stdio_session(src/mcp_servers/run_mcp_server.py)
+       ├─ list_tool_definitions(session)                 # tools for client.chat()
+       loop max_tool_rounds:
+         ├─ client.chat(messages, tools=tools)            # src/llm/connect_vertex_claude.py
+         ├─ assistant_message() / tool_result()           # src/llm/build_chat_messages.py
+         └─ call_tool_text(session, name, args)           # src/mcp_servers/connect_stdio_server.py
+              └─ run_mcp_server → server_tools → fetch_github_issues
+```
+
+**CLI flags added in Phase 3:**
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--target-easy` | `1` | Passed to prompt + `FinderConfig.target_easy_count` |
+| `--max-tool-rounds` | `10` | Max LLM ↔ tool iterations |
+
+**Linked-PR filter:** `run_finder` always passes `no_linked_prs=True` on `list_issues` (exclude issues with an open linked PR).
+
+**How to test Phase 3:**
+
+```bash
+# 3a — chat() smoke test (needs ADC + ANTHROPIC_VERTEX_PROJECT_ID)
+python -c "
+from dotenv import load_dotenv; load_dotenv('.env')
+import sys; sys.path.insert(0, 'src')
+from llm.create_llm_connection import establish_connection
+from llm.build_chat_messages import user_message
+c = establish_connection()
+r = c.chat([user_message('Reply with exactly: ok')])
+print(r.text.strip())
+"
+
+# 3b — MCP client only (needs GITHUB_TOKEN)
+PYTHONPATH=src python -c "
+import asyncio
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv('.env')
+from mcp_servers.connect_stdio_server import open_stdio_session, list_tool_definitions, call_tool_text
+async def main():
+    async with open_stdio_session(Path('src/mcp_servers/run_mcp_server.py')) as session:
+        tools = await list_tool_definitions(session)
+        print([t['name'] for t in tools])
+        print((await call_tool_text(session, 'list_issues', {'owner':'pytorch','repo':'pytorch','page':1,'per_page':2}))[:200])
+asyncio.run(main())
+"
+
+# 3c — full pipeline through agent loop (needs GITHUB_TOKEN, ADC)
+python run_easy_issue_finder.py --owner pytorch --repo pytorch
+# Expect: Find easy issues → raw JSON → Agent loop complete — ready for validation
+#         → Validate result: Not implemented yet — Phase 4
+```
+
+**Known gap:** [`user.txt`](prompts/easy_issue_finder/user.txt) does not yet instruct the model to call `list_issues` when `ISSUES_JSON=[]`; the model may return `exhausted_input` without fetching. Prompt update is a follow-up.
+
+---
+
+## Pending phases (reference)
+
+### Phase 4 (summary)
+
+| Phase | Call chain (planned) | How to test (when built) |
+|-------|----------------------|---------------------------|
+| **4 — VALIDATE** | `validate_and_print_result` → `result_validator` | Full run prints validated JSON |
+
+**Removed from pending:** Phase 3 agent loop (done — see above).
+
+---
+
+## End-state command
+
+When all phases are wired:
+
+```bash
+python run_easy_issue_finder.py \
+  --owner pytorch --repo pytorch \
+  --model claude-sonnet-4@20250514
+```
+
+---
+
+## MCP tools (Cursor)
 
 | Tool | Description |
 |------|-------------|
-| `list_issues` | List issues. Params: `owner`, `repo`, `state`, `labels`, `sort`, `per_page`, `page`, `include_pull_requests`, **`enrich_linked_prs`** (default `false`; extra API calls per issue when `true`) |
+| `list_issues` | List issues; `no_linked_prs=True` drops rows with an open linked PR (always on in agent loop) |
 | `get_issue` | Full issue JSON by number |
 
-### Issue summary fields (`list_issues`)
-
-| Field | Description |
-|-------|-------------|
-| `assignees` | Login strings; empty list = unassigned |
-| `open_linked_pr` | `true` / `false` when `enrich_linked_prs=true`; otherwise `null` |
-| `body_excerpt`, `labels`, `html_url`, … | Standard list-view fields |
-
-### Run MCP standalone
-
-```bash
-python run_server.py
-```
-
-Uses stdio transport; test with [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
+Issue summary fields from `list_issues`: `assignees`, `open_linked_pr`, `body_excerpt`, `labels`, `html_url`, …
 
 ---
 
-## Planned: easy_issue_finder CLI
+## Conventions
 
-Not implemented yet. Intended usage (v1):
-
-```bash
-# Future — requires ANTHROPIC_API_KEY, TRIAGE_MODEL
-python scripts/run_easy_issue_finder.py --owner pytorch --repo pytorch --enrich-linked-prs
-```
-
-A separate **`triage_agent`** CLI (`scripts/run_triage_agent.py`) is reserved for Phase 2+.
-
-Environment variables (see [`.env.example`](.env.example)):
-
-| Variable | Purpose |
-|----------|---------|
-| `GITHUB_TOKEN` | GitHub REST (required for rate limits) |
-
-When the LLM wrapper and CLI ship, `.env.example` will also document `ANTHROPIC_API_KEY`, `TRIAGE_MODEL`, and related settings.
-
----
-
-## Project layout
-
-```text
-run_server.py                         MCP entrypoint
-src/github_issues_mcp/                Shared GitHub + MCP (all agents)
-  github_api.py
-  issue_summary.py
-  mcp_tools/issue_list_tools.py
-  mcp_server.py
-src/llm/                              Shared LLM wrapper (planned)
-src/agents/
-  easy_issue_finder/                  Phase 1 agent (runner planned)
-  triage_agent/                       Phase 2+ (reserved)
-prompts/
-  easy_issue_finder/                  user.txt + prompt_loader.py
-  triage_agent/                       reserved
-scripts/
-  run_easy_issue_finder.py            (planned)
-  run_triage_agent.py                 (planned)
-.env.example
-```
+- **File names** describe what the file does (`load_model_config.py`, not `utils.py`).
+- **Function names** are the specific action inside that file (`load_model_settings()`, `establish_connection()`).
+- **Module docstrings:** purpose, who calls it, what it does not do.
+- Update this README when a phase is completed.
